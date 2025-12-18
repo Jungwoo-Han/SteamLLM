@@ -27,9 +27,9 @@ from chromadb.config import Settings
 class Config:
     def __init__(self):
         # 보안을 위해 환경 변수 사용을 권장하지만, 테스트를 위해 직접 입력 가능
-        self.openai_api_key = os.getenv("OPENAI_API_KEY", "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") 
-        self.model_name = "gpt-4o-mini"
-        self.embedding_model = "text-embedding-3-small"
+        self.openai_api_key = os.getenv("OPENAI_API_KEY", "secret_key") 
+        self.model_name = "gpt-4.1"
+        self.embedding_model = "text-embedding-3-large"
 
 # ---------------------------------------------------------
 # 2. LLM Client (AI 호출)
