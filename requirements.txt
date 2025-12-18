@@ -1,3 +1,9 @@
-beautifulsoup4
+streamlit
 requests
-pandas
+beautifulsoup4
+openai
+langchain
+langchain-core
+langchain-openai
+langchain-textsplitters
+chromadb
