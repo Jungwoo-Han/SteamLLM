@@ -3,7 +3,7 @@ requests
 beautifulsoup4
 openai
 langchain
-langchain-core
+langchain-community
 langchain-openai
-langchain-textsplitters
+langchain-text-splitters
 chromadb
