@@ -160,9 +160,7 @@ class SteamAPIClient:
 
 
 
-class RAGManager:
-    # (주의: 실제 Config, OpenAIEmbeddings, Document, RecursiveCharacterTextSplitter는 임포트가 되어 있어야 합니다)
-    
+class RAGManager: 
     def __init__(self, config: Config, persist_dir="chroma_db"):
         self.config = config
 
