@@ -1,58 +1,79 @@
-
-
 import streamlit as st
 import os
 import requests
 import json
 import re
-import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from bs4 import BeautifulSoup
 from urllib.parse import quote
 
-# LangChain Imports
+# LangChain Imports (최신 규격)
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
-from openai import OpenAI
 
 import chromadb
-from chromadb.config import Settings
-import streamlit as st
-
 
 # ---------------------------------------------------------
 # 1. Config (설정)
 # ---------------------------------------------------------
 class Config:
     def __init__(self):
-        # st.secrets에서 키를 가져오고, 없으면 None을 반환
         self.openai_api_key = st.secrets.get("OPENAI_API_KEY")
-        self.model_name = "gpt-4.1"
+        # 최신 gpt-5.1 모델 설정
+        self.model_name = "gpt-5.1" 
         self.embedding_model = "text-embedding-3-large"
 
 # ---------------------------------------------------------
-# 2. LLM Client (AI 호출)
+# 2. LLM Client (LangChain .invoke 방식 적용)
 # ---------------------------------------------------------
 class LLMClient:
     def __init__(self, config: Config):
-        self.client = OpenAI(api_key=config.openai_api_key)
-        self.model = config.model_name
+        # langchain-openai 0.3.x 규격 적용
+        self.llm = ChatOpenAI(
+            api_key=config.openai_api_key,
+            model=config.model_name,
+            reasoning={
+                "effort": "none",    # gpt-5.1의 추론 과정을 비활성화하여 속도 최적화
+                "summary": "auto",
+            },
+            verbosity="high",        # 디버깅용 로그 활성화
+            temperature=0.2
+        )
 
     def ask(self, prompt: str, system_message: str = "You are a helpful assistant.") -> str:
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.2
-            )
-            return response.choices[0].message.content
+            # 최신 메시지 객체 생성 및 .invoke() 호출
+            messages = [
+                SystemMessage(content=system_message),
+                HumanMessage(content=prompt)
+            ]
+            response = self.llm.invoke(messages)
+            return response.content
         except Exception as e:
             return f"❌ LLM Error: {str(e)}"
+
+# ---------------------------------------------------------
+# Intent Classifier (사용자 의도 분류)
+# ---------------------------------------------------------
+class IntentClassifier:
+    def __init__(self, llm_client: LLMClient):
+        self.llm = llm_client
+
+    def classify(self, user_input: str) -> str:
+        prompt = f"""
+[Role] Steam Interaction Router
+분석 방향을 결정하기 위해 사용자 입력을 다음 중 하나로 분류하세요:
+
+1. ANALYZE: 특정 게임 하나를 지칭하여 상태, 정보, 패치 등을 묻는 경우. (예: "배그 요즘 어때?", "사펑 할만함?")
+2. DISCOVER: 무엇을 분석할지 고민 중이거나, 요즘 트렌디한 게임 리스트를 보고 싶어 하는 경우. (예: "요즘 분석해볼 만한 게임 있어?", "스팀 인기작 추천해줘")
+3. CHAT: 게임 분석과 무관한 인사, 일상 대화, 혹은 서비스 사용법 질문. (예: "안녕?", "로그라이크가 뭐야?", "너는 누구니?")
+
+반드시 단어 하나(ANALYZE, DISCOVER, CHAT)만 출력하세요.
+입력: "{user_input}" """
+        return self.llm.ask(prompt).strip().upper()
 
 # ---------------------------------------------------------
 # 3. Steam API Client (데이터 수집)
@@ -129,34 +150,21 @@ class SteamAPIClient:
 
 
 class RAGManager:
-    # (주의: 실제 Config, OpenAIEmbeddings, Document, RecursiveCharacterTextSplitter는 임포트가 되어 있어야 합니다)
-    
     def __init__(self, config: Config, persist_dir="chroma_db"):
         self.config = config
-
-        # ---- OpenAI Embedding ----
         self.embeddings = OpenAIEmbeddings(
             model=config.embedding_model,
             openai_api_key=config.openai_api_key
         )
 
-        # ---- ChromaDB 초기화 (Persist 설정) ----
-        # Settings에 persist_directory가 지정되면 자동으로 디스크에 저장합니다.
-        self.client = chromadb.Client(
-            Settings(
-                anonymized_telemetry=False,
-                persist_directory=persist_dir
-            )
-        )
+        # 최신 버전의 방식인 PersistentClient 사용
+        self.client = chromadb.PersistentClient(path=persist_dir)
 
-        # 컬렉션 생성 (없으면 새로 생성)
         self.collection = self.client.get_or_create_collection(
             name="steam_data",
-            # embedding_function=self.embeddings (LangChain Embeddings 사용 시)
             metadata={"hnsw:space": "cosine"}
         )
 
-        # ---- Text Splitter ----
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200
@@ -314,8 +322,9 @@ class GameHealthAnalyzer:
             "all_score": overall
         }
 
+
 # ---------------------------------------------------------
-# 7. Main Agent (컨트롤러)
+# 7. Main Agent (컨트롤러 - 리팩토링 버전)
 # ---------------------------------------------------------
 class SteamAdvisorAgent:
     def __init__(self):
@@ -325,39 +334,55 @@ class SteamAdvisorAgent:
         self.rag = RAGManager(self.config)
         self.analyzer = GameHealthAnalyzer()
         self.extractor = GameNameExtractor(self.llm)
+        self.classifier = IntentClassifier(self.llm) # 신규 추가된 부품
 
     # -----------------------------------------------------
-    # 메인 실행 흐름
+    # Step 0. 메인 실행 흐름 (라우터)
     # -----------------------------------------------------
     def run(self, user_input: str) -> str:
-        print(f"\n🤖 분석 요청: '{user_input}'")
+        """사용자의 의도를 분류하고 적절한 핸들러로 라우팅합니다."""
+        intent = self.classifier.classify(user_input)
+        print(f"🔍 의도 분류 결과: {intent}")
 
-        # 1. 게임 식별
+        if intent == "ANALYZE":
+            return self._handle_analysis(user_input)
+        elif intent == "DISCOVER":
+            return self._handle_discovery(user_input)
+        else:
+            return self._handle_chat(user_input)
+
+    # -----------------------------------------------------
+    # 브랜치 1. 분석 핸들러 (1-1 vs 1-2 분기)
+    # -----------------------------------------------------
+    def _handle_analysis(self, user_input: str) -> str:
+        """특정 게임 분석을 처리하며, RAG 데이터 존재 여부에 따라 분기합니다."""
         game_info = self.extractor.extract_and_resolve(user_input)
         if not game_info:
-            return "죄송합니다. 해당 게임을 스팀에서 찾을 수 없습니다."
+            return "죄송합니다. 해당 게임을 스팀에서 찾을 수 없습니다. 정확한 게임명을 입력해 주세요."
 
         app_id = game_info["appid"]
         game_name = game_info["name"]
         print(f"🎯 대상 게임: {game_name} (ID: {app_id})")
 
-        # -----------------------------------------------
-        # 2. RAG에서 먼저 과거 데이터 검색 (이미 수집한 정보 활용)
-        # -----------------------------------------------
-        print("📚 기존 게임 데이터 검색 중...")
-        rag_context = self.rag.search(
-            query=user_input,
-            appid=app_id,
-            top_k=5
-        )
-        rag_text = self.rag.stringify_results(rag_context)
+        # RAG 데이터 존재 여부 확인
+        existing_docs = self.rag.search(query=user_input, appid=app_id, top_k=1)
 
-        # -----------------------------------------------
-        # 3. 부족하면 API 호출로 최신 데이터 수집
-        # -----------------------------------------------
-        if not rag_context:
-            print("⚠️ RAG 데이터 부족 → API 호출 시작")
+        if not existing_docs:
+            # [Branch 1-1] 데이터 없음: 정형 리포트 파이프라인 실행
+            print(f"🆕 '{game_name}' 신규 데이터 수집 모드 실행")
+            return self._run_full_report_pipeline(app_id, game_name, user_input)
+        else:
+            # [Branch 1-2] 데이터 있음: 비정형 대화 모드 실행
+            print(f"💬 '{game_name}' 기존 데이터 기반 대화 모드 실행")
+            context = self.rag.search(query=user_input, appid=app_id, top_k=5)
+            evidence = self.rag.stringify_results(context)
+            return self._run_conversational_qa(game_name, user_input, evidence)
 
+    # -----------------------------------------------------
+    # 브랜치 1-1. 정형 리포트 파이프라인 (기존 run 로직)
+    # -----------------------------------------------------
+    def _run_full_report_pipeline(self, app_id: int, game_name: str, user_input: str) -> str:
+        """실시간 데이터를 수집하고 정형화된 리포트를 생성합니다."""
         print("📡 실시간 Steam 데이터 수집 중...")
         players = self.api.get_current_players(app_id)
         reviews = self.api.get_review_stats(app_id)
@@ -366,46 +391,56 @@ class SteamAdvisorAgent:
         # 건강도 분석
         analysis = self.analyzer.analyze(players, reviews)
 
-        # -----------------------------------------------
-        # 4. 새로 수집한 데이터는 RAG DB에 저장
-        # -----------------------------------------------
-        print("💾 수집된 뉴스 데이터 RAG에 저장 중...")
+        # 데이터 RAG 저장
         if news:
-            self.rag.ingest(
-                appid=app_id,
-                game_name=game_name,
-                texts=news,
-                source="news"
-            )
+            print("💾 수집된 뉴스 데이터 RAG에 저장 중...")
+            self.rag.ingest(appid=app_id, game_name=game_name, texts=news, source="news")
 
-        # -----------------------------------------------
-        # 5. 다시 RAG 검색 (fresh 데이터 포함)
-        # -----------------------------------------------
-        print("🔍 반영된 데이터 기반 RAG 검색 재실행...")
-        updated_context = self.rag.search(
-            query=f"{user_input} update patch bug",
-            appid=app_id,
-            top_k=5
-        )
+        # 증거 데이터 검색
+        updated_context = self.rag.search(query=f"{user_input} update patch bug", appid=app_id)
         evidence = self.rag.stringify_results(updated_context)
 
-        # -----------------------------------------------
-        # 6. LLM 리포트 생성
-        # -----------------------------------------------
-        print("✍️ 리포트 생성 중...")
-        final_prompt = self._build_prompt(
-            query=user_input,
-            game_name=game_name,
-            analysis=analysis,
-            evidence=evidence,
-            players=players
-        )
-
+        print("✍️ 정형 리포트 생성 중...")
+        final_prompt = self._build_prompt(user_input, game_name, analysis, evidence, players)
         return self.llm.ask(final_prompt)
 
     # -----------------------------------------------------
-    # 프롬프트 생성
+    # 브랜치 1-2. 비정형 대화 (QA)
     # -----------------------------------------------------
+    def _run_conversational_qa(self, game_name: str, query: str, evidence: str) -> str:
+        """기존 지식을 바탕으로 자연스러운 대화를 나눕니다."""
+        prompt = f"""
+당신은 스팀 게임 전문 분석가입니다. 아래 제공된 [과거 분석 데이터]를 바탕으로 '{game_name}'에 대한 사용자의 질문에 답하세요.
+리포트 형식을 따르지 말고, 질문에 직접적이고 친절하게 대화하듯 답변하십시오.
+
+[과거 분석 데이터]
+{evidence}
+
+사용자 질문: "{query}"
+        """
+        return self.llm.ask(prompt)
+
+    # -----------------------------------------------------
+    # 브랜치 2. 분석 가이드 (Discovery)
+    # -----------------------------------------------------
+    def _handle_discovery(self, user_input: str) -> str:
+        prompt = f"""
+사용자가 분석할 만한 스팀 게임 리스트를 찾고 있습니다. 
+최근 트렌드, 대규모 업데이트, 혹은 갑작스러운 인기 상승 중인 게임 5가지를 추천하고 그 이유를 설명하세요.
+마지막에는 리스트 중 궁금한 게임의 이름을 입력하면 상세 분석을 시작하겠다는 안내를 포함하세요.
+
+사용자 질문: "{user_input}"
+        """
+        return self.llm.ask(prompt)
+
+    # -----------------------------------------------------
+    # 브랜치 3. 일반 대화 (Chat)
+    # -----------------------------------------------------
+    def _handle_chat(self, user_input: str) -> str:
+        prompt = f"당신은 친절한 AI 게임 파트너입니다. 게임에 관한 일반적인 상식이나 일상적인 대화에 답해 주세요. 질문: {user_input}"
+        return self.llm.ask(prompt)
+
+    # (기존 _build_prompt 메서드는 그대로 유지)
     def _build_prompt(self, query, game_name, analysis, evidence, players):
         return f"""
 [Role] Steam Analyst Agent
